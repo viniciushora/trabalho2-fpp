@@ -8,183 +8,194 @@
 #include <pthread.h>
 #include <semaphore.h>
 
-// Definição da estrutura de pacote
 typedef struct {
-	int numero;
-	int rodada;
-} Pacote;
+	int* numbers;
+	int* primes;
+	int max;
+	int bufferSize;
+	int primeSize;
+	int count;
+	int maxCount;
+	int primeCount;
+	int front;
+	int rear;
+	sem_t bufferEnd;
+	pthread_mutex_t mutex;
+	pthread_cond_t full;
+	pthread_cond_t empty;
+} PipelineBuffer;
 
-// Definição da estrutura de parâmetros
 typedef struct {
-	int N;                   // Número total de pacotes a serem gerados
-	int M;                   // Número de threads analisadoras
-	int K;                   // Tamanho do buffer circular
-	int X;                   // Tamanho do buffer interno
-	Pacote* buffer_comunicacao; // Buffer circular de comunicação
-	sem_t sem_buffer;        // Semáforo para controlar o buffer circular
-	sem_t sem_buffer_interno; // Semáforo para controlar o buffer interno
-	pthread_mutex_t mutex_resultado; // Mutex para proteger o acesso à impressão dos resultados
-	int pacote_atual;        // Índice do pacote atual
-	int pacotes_concluidos;  // Contador de pacotes concluídos
-} Parametros;
+	int count;
+	int max;
+	PipelineBuffer* pipeline;
+} GeneratorThread;
 
-// Função para verificar se um número é primo
-int isPrimo(int numero) {
-	if (numero < 2)
-		return 0;
+typedef struct {
+	int id;
+	int round;
+	PipelineBuffer* pipeline;
+} AnalyzeThread;
 
-	for (int i = 2; i <= numero / 2; i++) {
-		if (numero % i == 0)
-			return 0;
+void initializeBuffer(PipelineBuffer* buffer, int maximumSize, int bufferSize, int primeSize) {
+	buffer->numbers = (int*)malloc(bufferSize * sizeof(int));
+	buffer->primes = (int*)malloc(primeSize * sizeof(int));
+	buffer->max = maximumSize;
+	buffer->bufferSize = bufferSize;
+	buffer->primeSize = primeSize;
+	buffer->count = 0;
+	buffer->maxCount = 0;
+	buffer->primeCount = 0;
+	buffer->front = 0;
+	buffer->rear = 0;
+	sem_init(&buffer->bufferEnd, 0, 0);
+	pthread_mutex_init(&buffer->mutex, NULL);
+	pthread_cond_init(&buffer->full, NULL);
+	pthread_cond_init(&buffer->empty, NULL);
+}
+
+void destroyBuffer(PipelineBuffer* buffer) {
+	free(buffer->numbers);
+	free(buffer->primes);
+	pthread_mutex_destroy(&buffer->mutex);
+	pthread_cond_destroy(&buffer->full);
+	pthread_cond_destroy(&buffer->empty);
+}
+
+void produceNumber(PipelineBuffer* buffer, int number) {
+
+	pthread_mutex_lock(&buffer->mutex);
+
+	while (buffer->count == buffer->bufferSize) {
+		pthread_cond_wait(&buffer->empty, &buffer->mutex);
 	}
-	return 1;
+
+	buffer->numbers[buffer->rear] = number;
+	buffer->rear = (buffer->rear + 1) % buffer->bufferSize;
+	buffer->count++;
+
+	pthread_cond_signal(&buffer->full);
+	pthread_mutex_unlock(&buffer->mutex);
 }
 
-// Função para enviar um pacote para o buffer circular
-void enviarPacote(Pacote pacote, Parametros* parametros) {
-	sem_wait(&(parametros->sem_buffer));
-	parametros->buffer_comunicacao[parametros->pacote_atual] = pacote;
-	parametros->pacote_atual = (parametros->pacote_atual + 1) % parametros->K;
-	sem_post(&(parametros->sem_buffer_interno));
+int consumeNumber(PipelineBuffer* buffer) {
+	int number;
+
+	pthread_mutex_lock(&buffer->mutex);
+
+	while (buffer->count == 0) {
+		pthread_cond_wait(&buffer->full, &buffer->mutex);
+	}
+
+	number = buffer->numbers[buffer->front];
+	buffer->front = (buffer->front + 1) % buffer->bufferSize;
+	buffer->count--;
+
+	pthread_cond_signal(&buffer->empty);
+	pthread_mutex_unlock(&buffer->mutex);
+
+	return number;
 }
 
-// Função para receber um pacote do buffer circular
-Pacote receberPacote(Parametros* parametros) {
-	sem_wait(&(parametros->sem_buffer_interno));
-	Pacote pacote = parametros->buffer_comunicacao[parametros->pacotes_concluidos % parametros->K];
-	parametros->pacotes_concluidos++;
-	sem_post(&(parametros->sem_buffer));
-	return pacote;
+void produceResult(PipelineBuffer* buffer, int number, int id, int round, int divisor) {
+	if (divisor == 0) {
+		printf("%d is prime in thread %d at round %d\n", number, id, round);
+	} else if (divisor > 0) {
+		printf("%d divided by %d in thread %d at round %d\n", number, divisor, id, round);
+	}
+	if (divisor == -1) {
+		printf("%d CAUSED INTERNAL BUFFER OVERFLOW IN thread %d at round %d\n", number, id, round);
+	}
 }
 
-// Função executada pelas threads analisadoras
-void* thread_analisadora(void* arg) {
-	Parametros* parametros = (Parametros*)arg;
-	int* buffer_interno = malloc(parametros->X * sizeof(int));
-	int contador_primos = 0;
-	int rodada_atual = -1;
+void* generateNumbers(void* args) {
+	GeneratorThread* threadArgs = (GeneratorThread*)args;
+	PipelineBuffer* buffer = threadArgs->pipeline;
+
+	int number = 2;
 
 	while (1) {
-		Pacote pacote = receberPacote(parametros);
-
-		// Verificar se houve mudança de rodada
-		if (pacote.rodada != rodada_atual) {
-			contador_primos = 0;
-			rodada_atual = pacote.rodada;
+		if (number >= threadArgs->max) {
+			return NULL;
 		}
+		produceNumber(buffer, number++);
+	}
+}
 
-		// Verificar se o número é divisível por algum primo da rodada atual
-		int primo = 1;
-		for (int i = 0; i < contador_primos; i++) {
-			if (pacote.numero % buffer_interno[i] == 0) {
-				primo = 0;
+void* analyzeNumbers(void* args) {
+	AnalyzeThread* threadArgs = (AnalyzeThread*)args;
+	PipelineBuffer* buffer = threadArgs->pipeline;
+	int id = threadArgs->id;
+
+	while (1) {
+		int number = consumeNumber(buffer);
+		threadArgs->round = 0;
+
+		int isPrime = 1;
+
+		for (int i = 0; i < buffer->primeCount; i++) {
+			if (number % buffer->primes[i] == 0) {
+				isPrime = 0;
+				produceResult(buffer, number, id, threadArgs->round, buffer->primes[i]);
 				break;
 			}
+			threadArgs->round++;
 		}
 
-		// Se for primo, armazenar no buffer interno e enviar para a thread de resultados
-		if (primo) {
-			if (contador_primos == parametros->X) {
-				// Limite do buffer interno atingido, enviar mensagem de erro
-				pthread_mutex_lock(&(parametros->mutex_resultado));
-				printf("%d CAUSED INTERNAL BUFFER OVERFLOW IN %d, ROUND %d\n", pacote.numero, pacote.rodada, pthread_self());
-				pthread_mutex_unlock(&(parametros->mutex_resultado));
-				free(buffer_interno);
-				pthread_exit(NULL);
+		if (isPrime) {
+			if (buffer->primeCount < buffer->primeSize) {
+				buffer->primes[buffer->primeCount++] = number;
+				produceResult(buffer, number, id, threadArgs->round, 0);
 			}
-			buffer_interno[contador_primos] = pacote.numero;
-			contador_primos++;
+			else {
+				produceResult(buffer, number, id, threadArgs->round, -1);
+			}
+		}
 
-			// Enviar resultado para a thread de resultados
-			pthread_mutex_lock(&(parametros->mutex_resultado));
-			printf("%d is PRIME in %d\n", pacote.numero, pacote.rodada);
-			pthread_mutex_unlock(&(parametros->mutex_resultado));
+		if (number == buffer->maxCount) {
+			sem_post(&buffer->bufferEnd);
 		}
 	}
-}
-
-// Função executada pela thread geradora de pacotes
-void* thread_geradora(void* arg) {
-	Parametros* parametros = (Parametros*)arg;
-
-	for (int i = 2; i < parametros->N + 2; i++) {
-		Pacote pacote;
-		pacote.numero = i;
-		pacote.rodada = i - 2;
-		enviarPacote(pacote, parametros);
-	}
-
-	pthread_exit(NULL);
-}
-
-// Função executada pela thread de resultados
-void* thread_resultado(void* arg) {
-	Parametros* parametros = (Parametros*)arg;
-
-	while (parametros->pacotes_concluidos < parametros->N) {
-		Pacote pacote = receberPacote(parametros);
-
-		// Verificar se o número é o próximo na ordem de impressão
-		if (pacote.numero == parametros->pacotes_concluidos + 2) {
-			pthread_mutex_lock(&(parametros->mutex_resultado));
-			printf("%d is NOT PRIME in %d\n", pacote.numero, pacote.rodada);
-			pthread_mutex_unlock(&(parametros->mutex_resultado));
-		}
-		else {
-			enviarPacote(pacote, parametros);
-		}
-	}
-
-	pthread_exit(NULL);
 }
 
 int main(int argc, char* argv[]) {
 	/*
 	if (argc < 5) {
-		printf("Número incorreto de argumentos.\n");
+		printf("Usage: ./primes <N> <M> <K> <X>\n");
 		return 1;
 	}
 
-	Parametros parametros;
-	parametros.N = atoi(argv[1]);
-	parametros.M = atoi(argv[2]);
-	parametros.K = atoi(argv[3]);
-	parametros.X = atoi(argv[4]);
+	int N = atoi(argv[1]);
+	int M = atoi(argv[2]);
+	int K = atoi(argv[3]);
+	int X = atoi(argv[4]);
 	*/
-	Parametros parametros;
-	parametros.N = 8000;
-	parametros.M = 4;
-	parametros.K = 3;
-	parametros.X = 2;
+	int N = 8000;
+	int M = 4;
+	int K = 3;
+	int X = 2;
 
-	parametros.buffer_comunicacao = malloc(parametros.K * sizeof(Pacote));
-	parametros.pacote_atual = 0;
-	parametros.pacotes_concluidos = 0;
+	PipelineBuffer buffer;
+	initializeBuffer(&buffer, N, K, X);
 
-	sem_init(&(parametros.sem_buffer), 0, parametros.K);
-	sem_init(&(parametros.sem_buffer_interno), 0, 0);
-	pthread_mutex_init(&(parametros.mutex_resultado), NULL);
+	pthread_t generator;
+	pthread_t* analyzer = (pthread_t*)malloc(M * sizeof(pthread_t));
+	pthread_t printer;
 
-	pthread_t thread_geradora_id;
-	pthread_t thread_resultado_id;
-	pthread_t* thread_analisadora_ids = malloc(parametros.M * sizeof(pthread_t));
+	sem_t generateEnd;
+	sem_init(&generateEnd, 0, 0);
 
-	pthread_create(&thread_geradora_id, NULL, thread_geradora, (void*)&parametros);
-	pthread_create(&thread_resultado_id, NULL, thread_resultado, (void*)&parametros);
+	GeneratorThread generatorArgs = { .count = 0, .max = M, .pipeline = &buffer };
+	pthread_create(&generator, NULL, generateNumbers, (void*)&generatorArgs);
 
-	for (int i = 0; i < parametros.M; i++) {
-		pthread_create(&(thread_analisadora_ids[i]), NULL, thread_analisadora, (void*)&parametros);
+	for (int i = 0; i < M; i++) {
+		AnalyzeThread analyzerArgs = { .id = i, .pipeline = &buffer };
+		pthread_create(&analyzer[i], NULL, analyzeNumbers, (void*)&analyzerArgs);
 	}
 
-	pthread_join(thread_geradora_id, NULL);
-	pthread_join(thread_resultado_id, NULL);
+	sem_wait(&buffer.bufferEnd);
 
-	for (int i = 0; i < parametros.M; i++) {
-		pthread_join(thread_analisadora_ids[i], NULL);
-	}
-
-	free(parametros.buffer_comunicacao);
-	free(thread_analisadora_ids);
+	destroyBuffer(&buffer);
 
 	return 0;
 }
