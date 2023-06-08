@@ -32,9 +32,31 @@ typedef struct {
 } GeneratorThread;
 
 typedef struct {
+	int number;
+	int id;
+	int divisor;
+	int round;
+} PrinterPackage;
+
+typedef struct {
+	PrinterPackage* inputs;
+	sem_t printEnd;
+	int lastPrint;
+	int deadIndex;
+	int count;
+	int length;
+	pthread_mutex_t mutex;
+} PrinterBuffer;
+
+typedef struct {
+	PrinterBuffer* buffer;
+} PrinterThread;
+
+typedef struct {
 	int id;
 	int round;
 	PipelineBuffer* pipeline;
+	PrinterBuffer* printerBuffer;
 } AnalyzeThread;
 
 void initializeBuffer(PipelineBuffer* buffer, int maximumSize, int bufferSize, int primeSize) {
@@ -52,6 +74,16 @@ void initializeBuffer(PipelineBuffer* buffer, int maximumSize, int bufferSize, i
 	pthread_mutex_init(&buffer->mutex, NULL);
 	pthread_cond_init(&buffer->full, NULL);
 	pthread_cond_init(&buffer->empty, NULL);
+}
+
+void initializePrinterBuffer(PrinterBuffer* buffer, int maximumSize) {
+	buffer->inputs = (PrinterPackage*)malloc(maximumSize * sizeof(PrinterPackage));
+	buffer->length = maximumSize;
+	sem_init(&buffer->printEnd, 0, 0);
+	buffer->deadIndex = 0;
+	buffer->lastPrint = 1;
+	buffer->count = 0;
+	pthread_mutex_init(&buffer->mutex, NULL);
 }
 
 void destroyBuffer(PipelineBuffer* buffer) {
@@ -97,15 +129,44 @@ int consumeNumber(PipelineBuffer* buffer) {
 	return number;
 }
 
-void produceResult(PipelineBuffer* buffer, int number, int id, int round, int divisor) {
+
+void produceResult(PrinterBuffer* buffer, int number, int id, int round, int divisor) {
 	if (divisor == 0) {
 		printf("%d is prime in thread %d at round %d\n", number, id, round);
-	} else if (divisor > 0) {
+	}
+	else if (divisor > 0) {
 		printf("%d divided by %d in thread %d at round %d\n", number, divisor, id, round);
 	}
-	if (divisor == -1) {
+	else {
 		printf("%d CAUSED INTERNAL BUFFER OVERFLOW IN thread %d at round %d\n", number, id, round);
+		sem_post(buffer->printEnd);
 	}
+}
+
+void* printResults(void* args) {
+	PrinterThread* threadArgs = (PrinterThread*)args;
+	PrinterBuffer* buffer = threadArgs->buffer;
+	int i;
+
+	while (1) {
+		pthread_mutex_lock(&buffer->mutex);
+		for (i = buffer->deadIndex; i < buffer->length; i++) {
+			if (buffer->inputs[i].number == buffer->lastPrint + 1) {
+				produceResult(buffer, buffer->inputs[i].number, buffer->inputs[i].id, buffer->inputs[i].round, buffer->inputs[i].divisor);
+				buffer->lastPrint++;
+				buffer->deadIndex++;
+			}
+		}
+		pthread_mutex_unlock(&buffer->mutex);
+	}
+}
+
+void sendNumberToPrinter(PrinterBuffer* buffer, PrinterPackage numberPackage) {
+	int i = buffer->count;
+
+	buffer->inputs[i] = numberPackage;
+
+	buffer->count++;
 }
 
 void* generateNumbers(void* args) {
@@ -125,18 +186,25 @@ void* generateNumbers(void* args) {
 void* analyzeNumbers(void* args) {
 	AnalyzeThread* threadArgs = (AnalyzeThread*)args;
 	PipelineBuffer* buffer = threadArgs->pipeline;
+	PrinterBuffer* printerBuffer = threadArgs->printerBuffer;
 	int id = threadArgs->id;
+	PrinterPackage numberPackage;
 
 	while (1) {
 		int number = consumeNumber(buffer);
 		threadArgs->round = 0;
 
 		int isPrime = 1;
+		numberPackage.id = id;
+		numberPackage.number = number;
 
 		for (int i = 0; i < buffer->primeCount; i++) {
+
 			if (number % buffer->primes[i] == 0) {
 				isPrime = 0;
-				produceResult(buffer, number, id, threadArgs->round, buffer->primes[i]);
+
+				numberPackage.divisor = buffer->primes[i];
+				numberPackage.round = threadArgs->round;
 				break;
 			}
 			threadArgs->round++;
@@ -145,12 +213,23 @@ void* analyzeNumbers(void* args) {
 		if (isPrime) {
 			if (buffer->primeCount < buffer->primeSize) {
 				buffer->primes[buffer->primeCount++] = number;
-				produceResult(buffer, number, id, threadArgs->round, 0);
+
+				numberPackage.divisor = 0;
+				numberPackage.round = threadArgs->round;
+
+				sendNumberToPrinter(printerBuffer, numberPackage);
 			}
 			else {
-				produceResult(buffer, number, id, threadArgs->round, -1);
+				numberPackage.divisor = -1;
+				numberPackage.round = threadArgs->round;
 			}
 		}
+
+		pthread_mutex_lock(&printerBuffer->mutex);
+
+		sendNumberToPrinter(printerBuffer, numberPackage);
+
+		pthread_mutex_unlock(&printerBuffer->mutex);
 
 		if (number == buffer->maxCount) {
 			sem_post(&buffer->bufferEnd);
@@ -178,6 +257,9 @@ int main(int argc, char* argv[]) {
 	PipelineBuffer buffer;
 	initializeBuffer(&buffer, N, K, X);
 
+	PrinterBuffer printerBuffer;
+	initializePrinterBuffer(&printerBuffer, N);
+
 	pthread_t generator;
 	pthread_t* analyzer = (pthread_t*)malloc(M * sizeof(pthread_t));
 	pthread_t printer;
@@ -188,12 +270,15 @@ int main(int argc, char* argv[]) {
 	GeneratorThread generatorArgs = { .count = 0, .max = M, .pipeline = &buffer };
 	pthread_create(&generator, NULL, generateNumbers, (void*)&generatorArgs);
 
+	PrinterThread printerArgs = { .buffer = &printerBuffer };
+	pthread_create(&printer, NULL, printResults, (void*)&printerArgs);
+
 	for (int i = 0; i < M; i++) {
-		AnalyzeThread analyzerArgs = { .id = i, .pipeline = &buffer };
+		AnalyzeThread analyzerArgs = { .id = i, .pipeline = &buffer, .printerBuffer = &printerBuffer };
 		pthread_create(&analyzer[i], NULL, analyzeNumbers, (void*)&analyzerArgs);
 	}
 
-	sem_wait(&buffer.bufferEnd);
+	sem_wait(&printerBuffer.printEnd);
 
 	destroyBuffer(&buffer);
 
