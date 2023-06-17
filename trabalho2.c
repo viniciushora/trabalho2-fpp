@@ -129,7 +129,6 @@ int consumeNumber(PipelineBuffer* buffer) {
 	return number;
 }
 
-
 void produceResult(PrinterBuffer* buffer, int number, int id, int round, int divisor) {
 	if (divisor == 0) {
 		printf("%d is prime in thread %d at round %d\n", number, id, round);
@@ -149,15 +148,13 @@ void* printResults(void* args) {
 	int i;
 
 	while (1) {
-		pthread_mutex_lock(&buffer->mutex);
-		for (i = buffer->deadIndex; i < buffer->length; i++) {
+		for (i = 0; i < buffer->length; i++) {
 			if (buffer->inputs[i].number == buffer->lastPrint + 1) {
 				produceResult(buffer, buffer->inputs[i].number, buffer->inputs[i].id, buffer->inputs[i].round, buffer->inputs[i].divisor);
 				buffer->lastPrint++;
 				buffer->deadIndex++;
 			}
 		}
-		pthread_mutex_unlock(&buffer->mutex);
 	}
 }
 
@@ -175,12 +172,10 @@ void* generateNumbers(void* args) {
 
 	int number = 2;
 
-	while (1) {
-		if (number >= threadArgs->max) {
-			return NULL;
-		}
-		produceNumber(buffer, number++);
+	for (number; number <= buffer->max; number++) {
+		produceNumber(buffer, number);
 	}
+	return NULL;
 }
 
 void* analyzeNumbers(void* args) {
