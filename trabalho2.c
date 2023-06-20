@@ -1,3 +1,8 @@
+/*
+ * Trabalho 2: Pipeline de Threads
+ * Autores: Vinicius da Hora, Matheus Melotti, Jhovany Murgia
+ */
+
 #ifdef _MSC_VER
 #define _CRT_SECURE_NO_WARNINGS
 #endif
@@ -21,8 +26,8 @@ typedef struct {
 	int round;
 	int actualNumber;
 	int quantityThreads;
+	int deadProcess;
 	sem_t* semThreads;
-	sem_t bufferEnd;
 	pthread_mutex_t mutex;
 	pthread_cond_t full;
 	pthread_cond_t empty;
@@ -78,7 +83,7 @@ void initializeBuffer(PipelineBuffer* buffer, int maximumSize, int quantityThrea
 	buffer->rear = 0;
 	buffer->round = 0;
 	buffer->actualNumber = 0;
-	sem_init(&buffer->bufferEnd, 0, 0);
+	buffer->deadProcess = 0;
 	pthread_mutex_init(&buffer->mutex, NULL);
 	pthread_cond_init(&buffer->full, NULL);
 	pthread_cond_init(&buffer->empty, NULL);
@@ -97,7 +102,6 @@ void initializeThread(int id, PipelineBuffer* pipeline, PrinterBuffer* printerBu
 	analyzerArgs.primes = (int*)malloc(primesSize * sizeof(int));
 	analyzerArgs.printerBuffer = printerBuffer;
 	analyzerArgs.primeCount = 0;
-	//pthread_create(&analyzer[id], NULL, analyzeNumbers, (void*)&analyzerArgs);
 }
 
 void initializePrinterBuffer(PrinterBuffer* buffer, int maximumSize) {
@@ -113,10 +117,19 @@ void initializePrinterBuffer(PrinterBuffer* buffer, int maximumSize) {
 }
 
 void destroyBuffer(PipelineBuffer* buffer) {
+	free(buffer->semThreads);
 	free(buffer->numbers);
 	pthread_mutex_destroy(&buffer->mutex);
 	pthread_cond_destroy(&buffer->full);
 	pthread_cond_destroy(&buffer->empty);
+}
+
+void destroyPrinterBuffer(PrinterBuffer* buffer) {
+	free(buffer->inputs);
+	pthread_mutex_destroy(&buffer->mutex);
+	sem_destroy(&buffer->printEnd);
+	sem_destroy(&buffer->printVerifier);
+	sem_destroy(&buffer->printMailer);
 }
 
 void produceNumber(PipelineBuffer* buffer, int number) {
@@ -180,10 +193,15 @@ void* printResults(void* args) {
 				produceResult(buffer, buffer->inputs[i].number, buffer->inputs[i].id, buffer->inputs[i].round, buffer->inputs[i].divisor);
 				buffer->lastPrint++;
 				buffer->deadIndex++;
+				if (buffer->inputs[i].number == buffer->length) {
+					sem_post(&buffer->printEnd);
+				}
 			}
 		}
 		sem_post(&buffer->printMailer);
 	}
+
+	return NULL;
 }
 
 void sendNumberToPrinter(PrinterBuffer* buffer, PrinterPackage numberPackage) {
@@ -242,9 +260,10 @@ void* analyzeNumbers(void* args) {
 
 		numberPackage.number = number;
 
-		if (buffer->round + 1 > buffer->bufferSize) {
+		if (buffer->round + 1 > buffer->bufferSize && buffer->deadProcess == 0) {
 			numberPackage.divisor = -1;
 			sendNumberToPrinter(printerBuffer, numberPackage);
+			buffer->deadProcess = 1;
 		}
 
 		int isPrime = 1;
@@ -256,34 +275,39 @@ void* analyzeNumbers(void* args) {
 			numberPackage.divisor = threadArgs->primes[buffer->round];
 		}
 
-		if (isPrime) {
-			if (threadArgs->primeCount <= buffer->round) {
-				threadArgs->primes[buffer->round] = number;
-				threadArgs->primeCount++;
+		if (buffer->deadProcess == 0) {
+			if (isPrime) {
+				if (threadArgs->primeCount <= buffer->round) {
+					threadArgs->primes[buffer->round] = number;
+					threadArgs->primeCount++;
 
-				numberPackage.divisor = 0;
+					numberPackage.divisor = 0;
 
+					sendNumberToPrinter(printerBuffer, numberPackage);
+					buffer->round = 0;
+					buffer->actualNumber = 0;
+					sem_post(&buffer->semThreads[0]);
+				}
+				else {
+					if (returnToZero) {
+						buffer->round++;
+					}
+					sem_post(&buffer->semThreads[nextThread]);
+				}
+			} else {
 				sendNumberToPrinter(printerBuffer, numberPackage);
 				buffer->round = 0;
 				buffer->actualNumber = 0;
 				sem_post(&buffer->semThreads[0]);
-			} else {
-				if (returnToZero) {
-					buffer->round++;
-				}
-				sem_post(&buffer->semThreads[nextThread]);
 			}
-		} else {
-			sendNumberToPrinter(printerBuffer, numberPackage);
-			buffer->round = 0;
-			buffer->actualNumber = 0;
-			sem_post(&buffer->semThreads[0]);
 		}
 
-		if (number == buffer->maxCount) {
-			sem_wait(&buffer->bufferEnd);
+		if (number == printerBuffer->length) {
+			buffer->deadProcess = 1;
 		}
 	}
+
+	return NULL;
 }
 
 int main(int argc, char* argv[]) {
@@ -329,12 +353,13 @@ int main(int argc, char* argv[]) {
 		analyzerArgs[i].printerBuffer = &printerBuffer;
 		analyzerArgs[i].primeCount = 0;
 		pthread_create(&analyzer[i], NULL, analyzeNumbers, (void*)(analyzerArgs + i));
-		//initializeThread(i, &buffer, &printerBuffer, X, &analyzer);
 	}
 
 	sem_wait(&printerBuffer.printEnd);
 
 	destroyBuffer(&buffer);
+	destroyPrinterBuffer(&printerBuffer);
+	free(analyzer);
 
 	return 0;
 }
