@@ -70,7 +70,7 @@ typedef struct {
 	PrinterBuffer* printerBuffer;
 } AnalyzeThread;
 
-void initializeBuffer(PipelineBuffer* buffer, int maximumSize, int quantityThreads, int bufferSize, sem_t* semThreads) {
+void initializeBuffer(PipelineBuffer* buffer, int maximumSize, int quantityThreads, int cBufferSize, int bufferSize, sem_t* semThreads) {
 	buffer->numbers = (int*)malloc(bufferSize * sizeof(int));
 	buffer->max = maximumSize;
 	buffer->bufferSize = bufferSize;
@@ -93,15 +93,6 @@ void initializeBuffer(PipelineBuffer* buffer, int maximumSize, int quantityThrea
 		sem_init(&semThreads[i], 0, 0);
 	}
 	buffer->semThreads = semThreads;
-}
-
-void initializeThread(int id, PipelineBuffer* pipeline, PrinterBuffer* printerBuffer, int primesSize, pthread_t* analyzer) {
-	AnalyzeThread analyzerArgs;
-	analyzerArgs.id = id;
-	analyzerArgs.pipeline = pipeline;
-	analyzerArgs.primes = (int*)malloc(primesSize * sizeof(int));
-	analyzerArgs.printerBuffer = printerBuffer;
-	analyzerArgs.primeCount = 0;
 }
 
 void initializePrinterBuffer(PrinterBuffer* buffer, int maximumSize) {
@@ -221,7 +212,7 @@ void* generateNumbers(void* args) {
 
 	int number = 2;
 
-	for (number; number <= buffer->max; number++) {
+	for (number = number; number <= buffer->max; number++) {
 		produceNumber(buffer, number);
 	}
 	return NULL;
@@ -311,9 +302,8 @@ void* analyzeNumbers(void* args) {
 }
 
 int main(int argc, char* argv[]) {
-	/*
-	if (argc < 5) {
-		printf("Usage: ./primes <N> <M> <K> <X>\n");
+	if (argc != 5) {
+		printf("Uso: ./<nome_executavel>.exe <N> <M> <K> <X>\n");
 		return 1;
 	}
 
@@ -321,16 +311,11 @@ int main(int argc, char* argv[]) {
 	int M = atoi(argv[2]);
 	int K = atoi(argv[3]);
 	int X = atoi(argv[4]);
-	*/
-	int N = 8000;
-	int M = 4;
-	int K = 3;
-	int X = 2;
 
 	sem_t* semThreads = (sem_t*)malloc(M * sizeof(sem_t));
 
 	PipelineBuffer buffer;
-	initializeBuffer(&buffer, N, M, X, semThreads);
+	initializeBuffer(&buffer, N, M, K, X, semThreads);
 
 	PrinterBuffer printerBuffer;
 	initializePrinterBuffer(&printerBuffer, N);
