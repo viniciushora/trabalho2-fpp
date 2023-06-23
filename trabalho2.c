@@ -261,7 +261,7 @@ void* analyzeNumbers(void* args) {
 		numberPackage.id = id;
 		numberPackage.number = number;
 
-		if (threadArgs->primes[buffer->round] >= 2 || threadArgs->primes[buffer->round] <= printerBuffer->length) {
+		if (threadArgs->primes[buffer->round] >= 2 && threadArgs->primes[buffer->round] <= printerBuffer->length) {
 			if (number % threadArgs->primes[buffer->round] == 0) {
 				isPrime = 0;
 				numberPackage.divisor = threadArgs->primes[buffer->round];
